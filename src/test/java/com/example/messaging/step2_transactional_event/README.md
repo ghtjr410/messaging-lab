@@ -123,6 +123,7 @@ sequenceDiagram
 | AsyncEventTest | Async_리스너는_별도_스레드에서_실행되어_응답이_빠르다 | 비동기 응답 |
 | AsyncEventTest | Async_리스너_예외는_호출자에게_전파되지_않는다_실패가_숨겨진다 | 실패 은닉 |
 | EventualConsistencyTest | 주문_직후_포인트를_조회하면_아직_반영되지_않았을_수_있다 | Eventual Consistency |
+| AsyncEventLossTest | 서버가_재시작되면_Async_리스너가_처리하지_못한_이벤트는_유실된다 | **핵심 한계: 메모리 휘발** |
 
 ## 이 Step에서 인식해야 할 것
 
