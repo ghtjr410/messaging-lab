@@ -2,6 +2,12 @@
 **/build/
 !**/src/**/build/
 
+# IDE
+.idea/
+
+# Claude Code
+.claude/
+
 # Ignore Gradle GUI config
 gradle-app.setting
 
