@@ -21,6 +21,15 @@ Consumer는 각자의 offset을 관리하며, 같은 메시지를 여러 Consume
 | Consumer 재시작 | 놓친 메시지 없음 | offset부터 이어 읽기 |
 | 다중 Consumer | 브로드캐스트 | Consumer Group별 독립 소비 |
 
+### Fan-Out vs Competing Consumers
+
+Kafka는 두 가지 메시징 패턴을 모두 지원한다:
+
+- **Fan-Out**: 서로 다른 Consumer Group이 같은 메시지를 독립적으로 소비 (정산 Group + 알림 Group)
+- **Competing Consumers**: 같은 Consumer Group 내 여러 인스턴스가 파티션을 나눠 부하 분산
+
+Redis Pub/Sub은 Fan-Out만 가능했지만, Kafka는 Consumer Group 개념으로 두 패턴을 동시에 지원한다.
+
 ---
 
 ## 시퀀스 다이어그램

@@ -18,6 +18,25 @@ Step 3까지는 이벤트가 단일 프로세스 안에서만 순환했습니다
 - 적합: 캐시 무효화 신호, 실시간 알림
 - 부적합: 주문/결제 같은 유실 불가 이벤트
 
+## 메시징 패턴: Fan-Out (브로드캐스트)
+
+Redis Pub/Sub은 **Fan-Out** 패턴이다 — 모든 구독자가 같은 메시지를 받는다.
+
+```
+Publisher → Redis Channel → Subscriber A (정산)
+                          → Subscriber B (알림)
+                          → Subscriber C (분석)
+```
+
+이 패턴은 **"서로 다른 관심사가 같은 이벤트를 각자 처리"**할 때 적합하다.
+반대 패턴인 **Competing Consumers** (같은 관심사의 여러 인스턴스가 메시지를 나눠 처리)는
+Redis Pub/Sub으로는 불가능하다 — Step 5(Kafka Consumer Group)에서 다룬다.
+
+| 패턴 | 목적 | Redis Pub/Sub | Kafka |
+|------|------|:---:|:---:|
+| **Fan-Out** | 서로 다른 관심사가 같은 이벤트를 각자 처리 | O (브로드캐스트) | O (Consumer Group별 독립 소비) |
+| **Competing Consumers** | 같은 관심사의 인스턴스가 부하 분산 | X | O (같은 Group 내 파티션 분배) |
+
 ---
 
 ## 시퀀스 다이어그램
