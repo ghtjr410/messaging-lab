@@ -1,22 +1,49 @@
-# Step 3 — Event Store 학습 테스트
-
-도메인 저장과 이벤트 기록의 원자성을 검증한다.
-스케줄러(릴레이)가 PENDING 이벤트를 처리하는 흐름을 확인한다.
-서버 재시작 후에도 DB에 남아있는 이벤트를 재처리할 수 있음을 증명한다.
+# Step 3 — Event Store
 
 ---
 
-## EventStoreAtomicityTest
+## Step 2의 한계에서 시작하자
 
-도메인 저장과 이벤트 기록의 원자성 — 둘 다 성공하거나, 둘 다 실패해야 한다.
+Step 2에서 AFTER_COMMIT + @Async로 안전한 타이밍과 빠른 응답을 확보했다. graceful shutdown으로 정상 배포 시 이벤트 유실도 방어할 수 있었다.
 
-### 주문 저장과 이벤트 기록은 하나의 트랜잭션으로 묶인다
+근데 한 가지 근본적인 문제가 남았다.
+
+```
+서버가 비정상 종료되면 (kill -9, OOM, 크래시)
+→ 메모리에만 있던 이벤트가 사라진다
+→ DB에 기록이 없다
+→ 재처리할 방법이 없다
+```
+
+주문은 DB에 저장됐다. 근데 "주문이 생성되었다"는 이벤트는 메모리에만 있었다. 서버가 죽으면 이벤트가 증발하고, 포인트는 영영 적립되지 않는다. **고객이 문의하기 전까지 아무도 모른다.**
+
+해결 방법은 단순하다. **이벤트도 DB에 저장하면 된다.**
+
+---
+
+## 핵심 아이디어 — 도메인 저장과 이벤트 기록을 같은 트랜잭션으로
+
+주문을 저장할 때, 이벤트도 **같은 트랜잭션 안에서** DB에 기록한다.
+
+```java
+@Transactional
+void createOrder(CreateOrderCommand cmd) {
+    // 1. 도메인 저장
+    Order order = orderRepository.save(Order.create(cmd));
+
+    // 2. 이벤트 기록 (같은 TX!)
+    eventRecordRepository.save(EventRecord.create(
+        "ORDER_CREATED",
+        toJson(OrderCreatedEvent.from(order)),
+        EventStatus.PENDING
+    ));
+}
+```
 
 ```mermaid
 sequenceDiagram
-    participant Test as 테스트
     participant OS as OrderService
-    participant DB as DB
+    participant DB as orders
     participant ES as event_records
 
     Note over OS: TX BEGIN
@@ -24,18 +51,30 @@ sequenceDiagram
     OS->>ES: INSERT 이벤트 (status=PENDING)
     Note over OS: TX COMMIT
 
-    Test->>DB: 주문 조회 → status=CREATED ✅
-    Test->>ES: 이벤트 조회 → status=PENDING ✅
-    Note over ES: payload에 orderId,<br/>productName 포함
+    Note over DB: 주문 있음
+    Note over ES: 이벤트 있음 (PENDING)
 ```
 
-### 주문 저장이 실패하면 이벤트 기록도 함께 롤백된다
+> **EventStoreAtomicityTest** — `주문_저장과_이벤트_기록은_하나의_트랜잭션으로_묶인다()`에서 확인.
+
+왜 **같은 트랜잭션**이어야 하는가?
+
+따로 하면 이런 일이 생긴다.
+
+```
+TX1: 주문 저장 → COMMIT
+— 여기서 서버가 죽으면? —
+TX2: 이벤트 기록 → 실행 안 됨
+→ 주문은 있는데 이벤트 기록은 없다
+→ 재처리할 방법이 없다 (Step 2와 같은 문제)
+```
+
+같은 트랜잭션이면 **둘 다 성공하거나, 둘 다 실패한다.**
 
 ```mermaid
 sequenceDiagram
-    participant Test as 테스트
     participant OS as OrderService
-    participant DB as DB
+    participant DB as orders
     participant ES as event_records
 
     Note over OS: TX BEGIN
@@ -43,131 +82,105 @@ sequenceDiagram
     Note over OS: IllegalArgumentException!
     Note over OS: TX ROLLBACK
 
-    Test->>DB: findAll() → 비어있음 ✅
-    Test->>ES: findAll() → 비어있음 ✅
-
-    Note over Test: 주문이 실패하면<br/>이벤트도 함께 롤백된다<br/>(원자성 보장)
+    Note over DB: 주문 없음
+    Note over ES: 이벤트도 없음
 ```
+
+> **EventStoreAtomicityTest** — `주문_저장이_실패하면_이벤트_기록도_함께_롤백된다()`에서 확인.
+
+주문이 성공했으면 이벤트 기록도 반드시 있다. 주문이 실패했으면 이벤트 기록도 없다. **원자성.**
 
 ---
 
-## EventRelayTest
+## 스케줄러가 PENDING 이벤트를 처리한다
 
-스케줄러(릴레이)가 PENDING 이벤트를 처리하는 흐름.
+이벤트가 DB에 PENDING 상태로 저장됐다. 이제 누군가가 이걸 처리해야 한다.
 
-### 스케줄러는 PENDING 상태의 이벤트를 조회하여 처리한다
+**스케줄러(릴레이)**가 주기적으로 PENDING 이벤트를 조회해서 처리한다.
 
 ```mermaid
 sequenceDiagram
-    participant Test as 테스트
-    participant Relay as 스케줄러 (릴레이)
+    participant Relay as 스케줄러
     participant ES as event_records
     participant PS as PointService
-
-    Note over ES: PENDING 이벤트 1건<br/>(주문 생성 시 기록됨)
 
     Relay->>ES: SELECT WHERE status = 'PENDING'
     ES-->>Relay: 1건 반환
 
-    Relay->>PS: 포인트 적립 (1,500,000 × 1%)
+    Relay->>PS: 포인트 적립
     Relay->>ES: UPDATE status = 'PROCESSED'
-
-    Test->>PS: 포인트 조회 → amount=15,000 ✅
-    Note over Test: processed count = 1
 ```
 
-### 처리 완료된 이벤트는 PROCESSED 상태로 변경된다
-
-```mermaid
-sequenceDiagram
-    participant Test as 테스트
-    participant Relay as 스케줄러
-    participant ES as event_records
-
-    Note over ES: PENDING 1건
-
-    Relay->>ES: processEvents()
-    Relay->>ES: UPDATE status = 'PROCESSED'
-
-    Test->>ES: findByStatus(PENDING) → 0건
-    Test->>ES: findByStatus(PROCESSED) → 1건
-    Note over ES: eventType = ORDER_CREATED
+```java
+void processEvents() {
+    List<EventRecord> pending = eventRecordRepository.findByStatus(PENDING);
+    for (EventRecord record : pending) {
+        // 이벤트 처리 (포인트 적립, 알림 발송 등)
+        handle(record);
+        // 상태 전이
+        record.markAsProcessed();
+    }
+}
 ```
 
-### 이미 처리된 이벤트는 다시 처리하지 않는다
+> **EventRelayTest** — `스케줄러는_PENDING_상태의_이벤트를_조회하여_처리한다()`에서 확인.
 
-```mermaid
-sequenceDiagram
-    participant Test as 테스트
-    participant Relay as 스케줄러
-    participant ES as event_records
-    participant PS as PointService
+처리가 끝나면 상태가 PENDING → PROCESSED로 바뀐다.
 
-    Note over ES: PENDING 1건
+> **EventRelayTest** — `처리_완료된_이벤트는_PROCESSED_상태로_변경된다()`에서 확인.
 
-    Relay->>ES: processEvents() → 1건 처리
-    Note over ES: PROCESSED 1건
+그리고 PROCESSED 상태인 이벤트는 다시 처리되지 않는다. 스케줄러가 두 번 돌아도 중복 적립이 안 된다.
 
-    Relay->>ES: processEvents() → 0건 처리
-    Note over ES: PENDING이 없으므로<br/>처리할 것이 없다
-
-    Test->>PS: 포인트 조회 → 1건만 존재
-    Note over Test: 중복 적립 없음
-```
+> **EventRelayTest** — `이미_처리된_이벤트는_다시_처리하지_않는다()`에서 확인.
 
 ---
 
-## EventStoreRecoveryTest
+## 그래서 서버가 죽으면 어떻게 되는가
 
-서버 재시작 후에도 PENDING 이벤트가 DB에 남아있어서 재처리 가능.
-
-### 서버 재시작 후에도 PENDING 이벤트는 DB에 남아있다
+이제 Step 2에서 해결 못 했던 시나리오를 다시 보자.
 
 ```mermaid
 sequenceDiagram
-    participant Test as 테스트
     participant OS as OrderService
-    participant DB as DB
-    participant ES as event_records
-
-    OS->>DB: 주문 저장 + COMMIT
-    OS->>ES: 이벤트 기록 (PENDING) + COMMIT
-
-    Note over Test: 릴레이 실행 안 함<br/>(서버 다운 시뮬레이션)
-
-    Test->>ES: findByStatus(PENDING)
-    Note over ES: 1건 존재 ✅<br/>eventType = ORDER_CREATED
-
-    Note over Test: Step 2에서는 이벤트가<br/>메모리에만 있어 증발했지만<br/>여기서는 DB에 남아있다
-```
-
-### 재시작 후 스케줄러가 PENDING 이벤트를 재처리한다
-
-```mermaid
-sequenceDiagram
-    participant Test as 테스트
-    participant OS as OrderService
+    participant DB as orders
     participant ES as event_records
     participant Relay as 스케줄러
 
-    OS->>ES: 주문 2건 생성 → PENDING 2건
-    Note over Test: 릴레이 미실행 (서버 다운)
+    OS->>DB: 주문 저장
+    OS->>ES: 이벤트 기록 (PENDING)
+    Note over OS: TX COMMIT
 
-    Test->>ES: findByStatus(PENDING) → 2건
+    Note over Relay: 서버 비정상 종료!<br/>(스케줄러가 실행 전에 죽음)
 
-    Note over Test: === 서버 재시작 ===
+    Note over ES: PENDING 이벤트가<br/>DB에 남아있다
 
-    Relay->>ES: processEvents()
-    Note over ES: 2건 모두 PROCESSED
+    Note over Relay: === 서버 재시작 ===
 
-    Test->>ES: findByStatus(PENDING) → 0건 ✅
-    Test->>ES: findByStatus(PROCESSED) → 2건 ✅
-    Note over Test: 두 주문 모두 포인트 적립 완료
+    Relay->>ES: SELECT WHERE status = 'PENDING'
+    ES-->>Relay: 1건 반환
+    Relay->>Relay: 포인트 적립
+    Relay->>ES: UPDATE status = 'PROCESSED'
 ```
+
+Step 2에서는 이벤트가 메모리에만 있었기 때문에 서버가 죽으면 증발했다. **여기서는 DB에 PENDING으로 남아있다.** 서버가 살아나면 스케줄러가 PENDING을 조회해서 재처리한다.
+
+> **EventStoreRecoveryTest** — `서버_재시작_후에도_PENDING_이벤트는_DB에_남아있다()`에서 확인.
+> **EventStoreRecoveryTest** — `재시작_후_스케줄러가_PENDING_이벤트를_재처리한다()`에서 확인.
+
+이게 Event Store의 핵심 가치다. **"메모리가 아니라 DB에 기록하니까, 서버가 죽어도 재처리할 수 있다."**
 
 ---
 
-## Event Store 테이블 구조
+## Event Store 테이블은 이렇게 생겼다
+
+```
+event_records
+├── id (PK)
+├── event_type      "ORDER_CREATED"
+├── payload         JSON (orderId, amount, userId ...)
+├── status          PENDING → PROCESSED
+└── created_at      이벤트 생성 시각
+```
 
 ```mermaid
 erDiagram
@@ -182,29 +195,86 @@ erDiagram
     orders ||--o{ event_records : "같은 TX로 기록"
 ```
 
----
-
-## 학습 포인트
-
-이 Step을 마치면 다음 질문에 답할 수 있어야 합니다:
-
-- [ ] 주문 저장과 이벤트 기록이 왜 같은 트랜잭션이어야 하는가? 따로 하면 어떤 일이 생기는가?
-- [ ] 주문 저장은 성공했는데 이벤트 기록이 실패하면? (원자성이 없는 경우)
-- [ ] 스케줄러(릴레이)는 어떤 기준으로 이벤트를 조회하는가?
-- [ ] 서버가 죽었다 살아나면, Step 2에서는 이벤트가 증발했는데 여기서는 왜 살아있는가?
-
-> `EventStoreRecoveryTest`에서 "서버 재시작"을 시뮬레이션하는 방식을 확인해 보세요. 실제로 프로세스를 죽이는 게 아니라 DB에 남아있는 PENDING 레코드를 이용합니다.
+`status`가 이 테이블의 핵심이다. PENDING은 "아직 처리 안 됨", PROCESSED는 "처리 완료". 스케줄러는 PENDING만 조회하니까 이미 처리된 건 다시 안 건드린다.
 
 ---
 
-## 이 Step은 아직 완성형이 아니다
+## 잠깐 — 여기까지면 충분한 경우도 있다
 
-Event Store를 같은 서버의 스케줄러가 처리하므로 **단일 프로세스 한계가 여전합니다.**
-다른 시스템(정산, 알림, 분석)에도 이벤트를 보내야 한다면?
+모놀리식 애플리케이션에서 후속 처리(포인트 적립, 알림 발송)가 **같은 프로세스 안에서** 이뤄진다면, Event Store + 스케줄러만으로 충분할 수 있다.
 
-**Step 5에서 이 Event Store를 Kafka로 릴레이하면, Transactional Outbox Pattern이 완성됩니다.**
+```
+주문 서비스 (모놀리식)
+├── OrderService → event_records에 PENDING 기록
+├── 스케줄러 → PENDING 조회 → PointService 호출 → PROCESSED
+└── 전부 같은 프로세스, 같은 DB
+```
 
-## 체험할 한계 -> Step 4로
+이벤트 유실도 없고, 재처리도 되고, 구조도 단순하다. **Kafka 없이도 된다.**
 
-단일 프로세스 안에서만 이벤트가 순환한다.
-다른 서비스에 이벤트를 전달하려면 프로세스 경계를 넘어야 한다.
+그러면 **언제 Kafka가 필요해지는가?**
+
+```
+1. 포인트 서비스를 별도 팀이 독립 배포하게 되면
+   → ApplicationEvent는 프로세스 경계를 넘지 못한다
+
+2. 정산 시스템, 분석 시스템이 같은 이벤트를 소비해야 하면
+   → 각 시스템이 독립적으로, 자기 속도로 소비해야 한다
+
+3. 이벤트 핸들러가 무거운 작업을 해서 리소스 경합이 생기면
+   → 같은 프로세스에서 비즈니스 요청과 DB 커넥션을 나눠 쓰게 된다
+```
+
+이 중 하나라도 해당되면 프로세스 밖으로 이벤트를 보내야 한다. 그게 Step 4(Redis Pub/Sub)와 Step 5(Kafka)다.
+
+---
+
+## 그리고 이 Event Store가 나중에 Outbox가 된다
+
+지금은 스케줄러가 PENDING 이벤트를 조회해서 **같은 프로세스 안에서** 처리한다.
+
+Step 5에서는 스케줄러가 PENDING 이벤트를 조회해서 **Kafka로 발행**한다.
+
+```
+지금 (Step 3):
+  스케줄러 → PENDING 조회 → PointService.record() → PROCESSED
+
+Step 5:
+  스케줄러 → PENDING 조회 → Kafka.send() → SENT
+  Kafka Consumer → 포인트 적립
+```
+
+이 두 가지를 합치면 **Transactional Outbox Pattern**이 된다.
+
+```
+도메인 저장 + 이벤트 기록 (같은 TX)  ← Step 3에서 한 것
+릴레이가 이벤트를 Kafka로 발행        ← Step 5에서 할 것
+합치면 = Transactional Outbox
+```
+
+지금 만든 Event Store가 그대로 Outbox 테이블이 된다. **새로운 개념이 아니라, 이미 만든 것의 확장이다.**
+
+---
+
+## 스스로 답해보자
+
+- 주문 저장과 이벤트 기록을 왜 같은 트랜잭션으로 묶어야 하는가? 따로 하면 어떤 일이 생기는가?
+- 주문 저장은 성공했는데 이벤트 기록이 실패하면? (원자성이 없는 경우)
+- 스케줄러가 2번 돌면 포인트가 2번 적립되는가? 왜 안 되는가?
+- Step 2에서는 서버가 죽으면 이벤트가 증발했는데, 여기서는 왜 살아있는가?
+- 모놀리식에서 Event Store + 스케줄러만으로 충분한 상황은 어떤 경우인가?
+- 이 Event Store가 Step 5에서 어떻게 Outbox 테이블이 되는가?
+
+> 답이 바로 나오면 Step 4로 넘어가자.
+> 막히면 `EventStoreAtomicityTest`, `EventRelayTest`, `EventStoreRecoveryTest`를 실행해서 확인하자.
+
+---
+
+## 다음 Step으로
+
+Event Store로 이벤트 유실을 해결했다.
+하지만 스케줄러가 처리하는 것도, PointService를 호출하는 것도, 전부 **같은 프로세스 안**이다.
+
+다른 시스템에 이벤트를 전달하려면 **프로세스 경계를 넘어야 한다.**
+Step 4에서 Redis Pub/Sub로 프로세스 밖으로 이벤트를 보내본다.
+근데 거기서 **메시지가 저장되지 않는다는** 새로운 한계를 만난다.
