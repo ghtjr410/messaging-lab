@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class AsyncTransactionalPointListener {
 
     private final PointRepository pointRepository;
+    private final AtomicBoolean enabled = new AtomicBoolean(true);
     private final AtomicBoolean shouldFail = new AtomicBoolean(false);
     private final AtomicReference<String> executedThread = new AtomicReference<>();
     private volatile CountDownLatch latch;
@@ -40,7 +41,12 @@ public class AsyncTransactionalPointListener {
         return executedThread.get();
     }
 
+    public void setEnabled(boolean on) {
+        this.enabled.set(on);
+    }
+
     public void reset() {
+        enabled.set(true);
         shouldFail.set(false);
         executedThread.set(null);
         latch = null;
@@ -49,6 +55,10 @@ public class AsyncTransactionalPointListener {
     @Async
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void handle(OrderCreatedEvent event) {
+        if (!enabled.get()) {
+            if (latch != null) latch.countDown();
+            return;
+        }
         executedThread.set(Thread.currentThread().getName());
         try {
             if (shouldFail.get()) {

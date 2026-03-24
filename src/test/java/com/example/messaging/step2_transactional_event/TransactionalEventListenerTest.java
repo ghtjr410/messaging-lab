@@ -4,6 +4,7 @@ import com.example.messaging.step2_transactional_event.domain.Order;
 import com.example.messaging.step2_transactional_event.domain.OrderStatus;
 import com.example.messaging.step2_transactional_event.listener.TransactionalPointListener;
 import com.example.messaging.step2_transactional_event.repository.OrderRepository;
+import com.example.messaging.step2_transactional_event.repository.PointRepository;
 import com.example.messaging.step2_transactional_event.service.OrderService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayNameGeneration;
@@ -34,10 +35,14 @@ class TransactionalEventListenerTest {
     @Autowired
     OrderRepository orderRepository;
 
+    @Autowired
+    PointRepository pointRepository;
+
     @AfterEach
     void tearDown() {
         transactionalPointListener.reset();
         orderRepository.deleteAll();
+        pointRepository.deleteAll();
     }
 
     @Nested

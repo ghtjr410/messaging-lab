@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class TransactionalPointListener {
 
     private final PointRepository pointRepository;
+    private final AtomicBoolean enabled = new AtomicBoolean(true);
     private final AtomicBoolean shouldFail = new AtomicBoolean(false);
     private final AtomicBoolean executed = new AtomicBoolean(false);
     private Runnable callback;
@@ -37,7 +38,12 @@ public class TransactionalPointListener {
         return executed.get();
     }
 
+    public void setEnabled(boolean on) {
+        this.enabled.set(on);
+    }
+
     public void reset() {
+        enabled.set(true);
         shouldFail.set(false);
         executed.set(false);
         callback = null;
@@ -45,6 +51,7 @@ public class TransactionalPointListener {
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     public void handle(OrderCreatedEvent event) {
+        if (!enabled.get()) return;
         executed.set(true);
         if (callback != null) {
             callback.run();

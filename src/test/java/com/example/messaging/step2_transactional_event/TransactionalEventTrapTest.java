@@ -1,6 +1,7 @@
 package com.example.messaging.step2_transactional_event;
 
 import com.example.messaging.step2_transactional_event.listener.AfterCommitDbSaveListener;
+import com.example.messaging.step2_transactional_event.listener.AsyncTransactionalPointListener;
 import com.example.messaging.step2_transactional_event.listener.TransactionalPointListener;
 import com.example.messaging.step2_transactional_event.repository.OrderRepository;
 import com.example.messaging.step2_transactional_event.repository.PointRepository;
@@ -12,9 +13,12 @@ import org.junit.jupiter.api.DisplayNameGenerator;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContext;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
-import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.test.annotation.DirtiesContext;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -36,6 +40,9 @@ class TransactionalEventTrapTest {
     TransactionalPointListener transactionalPointListener;
 
     @Autowired
+    AsyncTransactionalPointListener asyncPointListener;
+
+    @Autowired
     AfterCommitDbSaveListener afterCommitDbSaveListener;
 
     @Autowired
@@ -44,10 +51,16 @@ class TransactionalEventTrapTest {
     @Autowired
     PointRepository pointRepository;
 
+    @Autowired
+    ApplicationContext applicationContext;
+
     @AfterEach
     void tearDown() {
         transactionalPointListener.reset();
+        asyncPointListener.reset();
         afterCommitDbSaveListener.reset();
+        orderRepository.deleteAll();
+        pointRepository.deleteAll();
     }
 
     /**
@@ -70,62 +83,68 @@ class TransactionalEventTrapTest {
      * 함정 2: @EnableAsync 없이 @Async를 달면 동기로 실행된다.
      * Spring이 @Async를 처리하려면 @EnableAsync가 필요하다.
      * 없으면 @Async가 조용히 무시되어 호출자 스레드에서 동기로 실행된다.
+     * 에러도 경고도 없다.
      */
     @Test
-    void EnableAsync_없이_Async를_달면_동기로_실행된다() {
-        // SimpleAsyncTaskExecutor는 @EnableAsync의 기본 실행기다.
-        // @EnableAsync가 없으면 @Async 어노테이션이 조용히 무시되어
-        // 호출자 스레드에서 동기적으로 실행된다. 에러도 경고도 없다.
-        SimpleAsyncTaskExecutor executor = new SimpleAsyncTaskExecutor();
-        assertThat(executor.getThreadNamePrefix()).startsWith("SimpleAsyncTaskExecutor");
+    void EnableAsync가_있어야_Async_리스너가_별도_스레드에서_실행된다() throws InterruptedException {
+        // @EnableAsync가 활성화되어 있으므로 @Async 리스너가 별도 스레드에서 실행된다.
+        // @EnableAsync를 제거하면 같은 스레드에서 동기적으로 실행되며, 아래 assertion이 실패한다.
+        CountDownLatch latch = new CountDownLatch(1);
+        asyncPointListener.setLatch(latch);
+
+        String callerThread = Thread.currentThread().getName();
+        orderService.createOrder("user-async-check", 50_000L);
+        assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // @EnableAsync 덕분에 다른 스레드에서 실행됨
+        assertThat(asyncPointListener.getExecutedThread()).isNotEqualTo(callerThread);
+        // @EnableAsync를 제거하면 이 assertion이 실패한다 (같은 스레드에서 실행)
     }
 
     /**
-     * 함정 3: AFTER_COMMIT에서 DB 저장은 REQUIRES_NEW로 새 TX를 열어야 안전하다.
+     * 함정 3: AFTER_COMMIT에서 DB 저장은 별도 빈의 REQUIRES_NEW로 새 TX를 열어야 안전하다.
      *
      * AFTER_COMMIT 시점에 기존 TX는 이미 커밋되었다.
-     * Spring Data JPA의 repository.save()는 자체 @Transactional이 있어 우연히 동작하지만,
-     * EntityManager를 직접 쓰거나 여러 DB 작업을 하나의 TX로 묶어야 할 때는
-     * 반드시 REQUIRES_NEW로 명시적 TX를 열어야 한다.
+     * 같은 클래스 내부에서 this.method()를 호출하면 Spring AOP 프록시를 거치지 않아
+     * @Transactional(REQUIRES_NEW)이 무시된다. 반드시 별도 빈으로 분리해야 한다.
      */
     @Test
-    void AFTER_COMMIT_리스너에서_REQUIRES_NEW로_새_TX를_열면_DB_저장_가능() {
-        // Given: REQUIRES_NEW 사용
+    void AFTER_COMMIT_리스너에서_별도_빈의_REQUIRES_NEW로_새_TX를_열면_DB_저장_가능() {
+        // Given: 다른 포인트 저장 리스너 비활성화 (격리)
+        transactionalPointListener.setEnabled(false);
+        asyncPointListener.setEnabled(false);
+
+        // 별도 빈(PointSaveService)을 통한 REQUIRES_NEW 사용
         afterCommitDbSaveListener.enable();
         afterCommitDbSaveListener.setUseRequiresNew(true);
 
         // When
         orderService.createOrder("user-trap-new", 50_000L);
 
-        // Then: 새 TX에서 저장 성공
+        // Then: 별도 빈의 REQUIRES_NEW로 새 TX에서 저장 성공
         assertThat(afterCommitDbSaveListener.isExecuted()).isTrue();
         assertThat(pointRepository.findByUserId("user-trap-new")).isPresent();
     }
 
     /**
-     * 함정 4: @Async 기본 스레드풀(SimpleAsyncTaskExecutor)은 스레드를 풀링하지 않는다.
-     * 요청마다 새 스레드를 만들고, 프로덕션에서 OOM을 유발할 수 있다.
+     * 함정 4: Spring Boot는 기본으로 ThreadPoolTaskExecutor를 등록하지만,
+     * corePoolSize=8, maxPoolSize=Integer.MAX_VALUE, queueCapacity=Integer.MAX_VALUE가 기본값이다.
+     * 프로덕션에서는 반드시 적절한 풀 사이즈와 큐 용량을 설정해야 한다.
      */
     @Test
-    void Async_기본_스레드풀은_스레드를_무한_생성하고_풀링하지_않는다() {
-        // SimpleAsyncTaskExecutor: 매번 새 스레드 생성, 풀링 없음
-        SimpleAsyncTaskExecutor simple = new SimpleAsyncTaskExecutor();
+    void Async_기본_스레드풀은_제한_없이_설정되어_프로덕션에서_튜닝이_필요하다() {
+        // Spring Boot가 자동 등록하는 applicationTaskExecutor 확인
+        ThreadPoolTaskExecutor executor = applicationContext
+                .getBean("applicationTaskExecutor", ThreadPoolTaskExecutor.class);
 
-        // ThreadPoolTaskExecutor: 스레드 풀, 큐, 재사용
-        ThreadPoolTaskExecutor pool = new ThreadPoolTaskExecutor();
-        pool.setCorePoolSize(5);
-        pool.setMaxPoolSize(10);
-        pool.setQueueCapacity(100);
-        pool.initialize();
+        // 기본값: 제한이 사실상 없다 → 프로덕션에서 OOM 위험
+        assertThat(executor.getCorePoolSize()).isEqualTo(8);
+        assertThat(executor.getMaxPoolSize()).isEqualTo(Integer.MAX_VALUE);
+        assertThat(executor.getQueueCapacity()).isEqualTo(Integer.MAX_VALUE);
 
-        try {
-            // ThreadPoolTaskExecutor는 명시적인 풀 사이즈가 있다
-            assertThat(pool.getCorePoolSize()).isEqualTo(5);
-            assertThat(pool.getMaxPoolSize()).isEqualTo(10);
-
-            // 프로덕션에서는 반드시 ThreadPoolTaskExecutor를 사용해야 한다
-        } finally {
-            pool.shutdown();
-        }
+        // 프로덕션에서는 서비스 특성에 맞게 제한해야 한다:
+        // executor.setCorePoolSize(5);
+        // executor.setMaxPoolSize(10);
+        // executor.setQueueCapacity(100);
     }
 }

@@ -2,6 +2,7 @@ package com.example.messaging.step2_transactional_event;
 
 import com.example.messaging.step2_transactional_event.listener.PhaseTestListener;
 import com.example.messaging.step2_transactional_event.repository.OrderRepository;
+import com.example.messaging.step2_transactional_event.repository.PointRepository;
 import com.example.messaging.step2_transactional_event.service.OrderService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayNameGeneration;
@@ -30,10 +31,14 @@ class TransactionalEventListenerPhaseTest {
     @Autowired
     OrderRepository orderRepository;
 
+    @Autowired
+    PointRepository pointRepository;
+
     @AfterEach
     void tearDown() {
         phaseTestListener.reset();
         orderRepository.deleteAll();
+        pointRepository.deleteAll();
     }
 
     @Test
