@@ -76,7 +76,8 @@ class EventedOrderService {
 
     void createOrder(...) {
         orderRepository.save(order);
-        publisher.publishEvent(OrderCreatedEvent.from(order));
+        publisher.publishEvent(new OrderCreatedEvent(
+                order.getId(), userId, amount, Instant.now()));
         // 누가 듣든 내 알 바 아님
     }
 }
@@ -165,7 +166,7 @@ void createOrder(...) {
     publisher.publishEvent(new InventoryDeductEvent(productId, quantity));
     publisher.publishEvent(new CouponUseEvent(couponId));
     publisher.publishEvent(new PaymentRequestEvent(orderId, amount));
-    publisher.publishEvent(new OrderCreatedEvent(orderId, amount, now));
+    publisher.publishEvent(new OrderCreatedEvent(orderId, userId, amount, now));
 }
 ```
 
@@ -195,7 +196,7 @@ OrderCreatedEvent     → "주문이 생성되었다"   → 이건 Event다
 올바른 이름 (진짜 Event):
   OrderCreatedEvent          → "주문이 생성되었다"
   OrderCompletedEvent        → "주문이 완료되었다"
-  OrderCancelledEven         → "주문이 취소되었다"
+  OrderCancelledEvent        → "주문이 취소되었다"
 ```
 
 이벤트는 **"누가 무엇을 해라"가 아니라 "무슨 일이 일어났는가"**를 표현해야 한다. 그래야 알림 서비스는 알림을, 재고 서비스는 재고 차감을, 각자 독립적으로 반응할 수 있다.
@@ -219,7 +220,8 @@ void createOrder(CreateOrderCommand cmd) {
     Order order = orderRepository.save(...);
 
     // Event — 비동기, 별도 TX (Step 2에서)
-    publisher.publishEvent(OrderCreatedEvent.from(order));
+    publisher.publishEvent(new OrderCreatedEvent(
+            order.getId(), order.getUserId(), order.getAmount(), Instant.now()));
 }
 ```
 

@@ -10,10 +10,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.annotation.DirtiesContext;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -56,15 +52,14 @@ class EventListenerExceptionTest {
     @Test
     void EventListener는_발행자와_같은_스레드에서_동기적으로_실행된다() {
         // Given
-        List<String> listenerThreads = Collections.synchronizedList(new ArrayList<>());
         pointEventListener.setShouldFail(false);
 
         // When
         String callerThread = Thread.currentThread().getName();
         orderService.createOrder("user-1", 50_000L);
 
-        // Then: @EventListener는 발행자와 같은 트랜잭션, 같은 스레드에서 실행된다
-        // (동기적이므로 publish 호출이 리스너 실행을 포함한다)
-        // 이것이 리스너 예외가 발행자 TX를 롤백시키는 원인이다
+        // Then: @EventListener는 발행자와 같은 스레드에서 실행된다
+        assertThat(pointEventListener.getLastExecutionThread()).isEqualTo(callerThread);
+        // 같은 스레드 = 같은 트랜잭션 → 리스너 예외가 발행자 TX를 롤백시키는 원인
     }
 }

@@ -21,9 +21,16 @@ public class PointEventListener {
         this.shouldFail = shouldFail;
     }
 
+    private String lastExecutionThread;
+
+    public String getLastExecutionThread() {
+        return lastExecutionThread;
+    }
+
     @EventListener
     @Order(100) // 다른 리스너보다 나중에 실행
     public void handle(OrderCreatedEvent event) {
+        lastExecutionThread = Thread.currentThread().getName();
         if (shouldFail) {
             throw new RuntimeException("포인트 적립 실패");
         }
