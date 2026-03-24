@@ -3,7 +3,7 @@ package com.example.messaging.step7_idempotent_consumer.domain;
 import jakarta.persistence.*;
 
 @Entity
-@Table(name = "step6_point_accounts")
+@Table(name = "step7_point_accounts")
 public class PointAccount {
 
     @Id

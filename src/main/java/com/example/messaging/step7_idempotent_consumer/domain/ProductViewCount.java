@@ -4,7 +4,7 @@ import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "step6_product_view_counts")
+@Table(name = "step7_product_view_counts")
 public class ProductViewCount {
 
     @Id
