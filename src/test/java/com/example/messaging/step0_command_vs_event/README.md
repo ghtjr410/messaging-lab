@@ -241,7 +241,7 @@ sequenceDiagram
 @Transactional
 void handle(CreateOrderCommand cmd) {
     // Command를 받아서 실행한다 (미래 → 현재)
-    Order order = Order.create(cmd.userId(), cmd.productId(), cmd.quantity());
+    Order order = Order.create(cmd.userId(), cmd.amount());
     orderRepository.save(order);
 
     // 실행 결과를 Event로 발행한다 (현재 → 과거 확정)
