@@ -102,7 +102,36 @@ class TransactionalEventTrapTest {
     }
 
     /**
-     * 함정 3: AFTER_COMMIT에서 DB 저장은 별도 빈의 REQUIRES_NEW로 새 TX를 열어야 안전하다.
+     * 함정 3-1: AFTER_COMMIT 시점에 기존 TX는 이미 커밋되었다.
+     *
+     * REQUIRES_NEW 없이는 안전한 DB 저장이 보장되지 않는다.
+     * Spring Data JPA의 save()는 자체 @Transactional로 우연히 동작할 수 있지만,
+     * EntityManager를 직접 사용하면 TransactionRequiredException이 발생한다.
+     * 의도한 TX 경계가 아니므로 REQUIRES_NEW를 사용해야 한다.
+     */
+    @Test
+    void AFTER_COMMIT_리스너에서_DB_저장하면_TransactionRequiredException_발생() {
+        // Given: 다른 포인트 저장 리스너 비활성화 (격리)
+        transactionalPointListener.setEnabled(false);
+        asyncPointListener.setEnabled(false);
+
+        // AFTER_COMMIT 리스너 활성화 (REQUIRES_NEW 미사용)
+        afterCommitDbSaveListener.enable();
+        afterCommitDbSaveListener.setUseRequiresNew(false);
+
+        // When
+        orderService.createOrder("user-no-tx", 50_000L);
+
+        // Then: 핸들러는 실행됐지만 REQUIRES_NEW 없이는 포인트가 저장되지 않음
+        assertThat(afterCommitDbSaveListener.isExecuted()).isTrue();
+        assertThat(pointRepository.findByUserId("user-no-tx")).isEmpty();
+        // EntityManager 직접 사용 시 TransactionRequiredException이 발생한다.
+        // Spring Data JPA의 save()는 자체 @Transactional로 우연히 동작할 수 있지만,
+        // 이건 의도한 TX 경계가 아니다. → 다음 테스트에서 REQUIRES_NEW로 해결한다.
+    }
+
+    /**
+     * 함정 3-2: AFTER_COMMIT에서 DB 저장은 별도 빈의 REQUIRES_NEW로 새 TX를 열어야 안전하다.
      *
      * AFTER_COMMIT 시점에 기존 TX는 이미 커밋되었다.
      * 같은 클래스 내부에서 this.method()를 호출하면 Spring AOP 프록시를 거치지 않아

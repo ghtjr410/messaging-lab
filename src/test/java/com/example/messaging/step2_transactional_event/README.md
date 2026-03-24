@@ -235,7 +235,7 @@ AFTER_COMMIT + @Async까지 왔으면 기본 구조는 잡힌 거다. 근데 실
 // @Transactional이 없다!
 void createOrder(...) {
     orderRepository.save(order);
-    publisher.publishEvent(OrderCreatedEvent.from(order));
+    publisher.publishEvent(OrderCreatedEvent.of(order.getId(), userId, order.getAmount()));
 }
 ```
 
@@ -258,37 +258,47 @@ void onOrderCreated(OrderCreatedEvent event) {
 
 Spring이 `@Async`를 처리하려면 `@EnableAsync`가 필요하다. 없으면 `@Async`가 **조용히 무시**된다. 경고도 에러도 없이 동기로 실행된다.
 
-> **TransactionalEventTrapTest** — `EnableAsync_없이_Async를_달면_동기로_실행된다()`에서 확인.
+> **TransactionalEventTrapTest** — `EnableAsync가_있어야_Async_리스너가_별도_스레드에서_실행된다()`에서 확인.
 
-### 함정 3: AFTER_COMMIT 리스너에서 DB 저장이 안 된다
+### 함정 3: AFTER_COMMIT 리스너에서 DB 저장의 함정
 
 ```java
 @TransactionalEventListener(phase = AFTER_COMMIT)
 void onOrderCreated(OrderCreatedEvent event) {
     Point point = new Point(event.userId(), event.amount());
-    pointRepository.save(point);   // → TransactionRequiredException!
+    pointRepository.save(point);
 }
 ```
 
-AFTER_COMMIT이면 **기존 트랜잭션은 이미 커밋됐다.** 트랜잭션이 없는 상태에서 JPA `save()`를 호출하면 예외가 터진다.
+AFTER_COMMIT이면 **기존 트랜잭션은 이미 커밋됐다.** Spring Data JPA의 `save()`는 내부에 `@Transactional`이 있어서 예외 없이 동작할 수 있지만, 이건 **원래 주문 TX와 무관한 별도 TX**에서 실행되는 것이다. 의도한 트랜잭션 경계가 아니라 JPA 내부 동작에 의존하는 우연한 성공이라서, 명시적으로 새 트랜잭션을 여는 것이 올바르다.
 
-해결하려면 **새 트랜잭션을 열어야 한다.**
+그리고 같은 클래스에서 `@Transactional(REQUIRES_NEW)`를 달아도 **self-invocation** 때문에 프록시를 타지 않는다. **별도 빈으로 분리해야 한다.**
 
 ```java
+// 별도 빈
+@Service
+class PointRecorder {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void record(String userId, long amount) {
+        pointRepository.save(new Point(userId, amount));
+    }
+}
+
+// 리스너
 @TransactionalEventListener(phase = AFTER_COMMIT)
-@Transactional(propagation = Propagation.REQUIRES_NEW)   // 새 TX
 void onOrderCreated(OrderCreatedEvent event) {
-    pointRepository.save(new Point(event.userId(), event.amount()));
+    pointRecorder.record(event.userId(), event.amount());  // 별도 빈 호출
 }
 ```
 
-> **TransactionalEventTrapTest** — `AFTER_COMMIT_리스너에서_REQUIRES_NEW로_새_TX를_열면_DB_저장_가능()`에서 확인.
+> **TransactionalEventTrapTest** — `AFTER_COMMIT_리스너에서_DB_저장하면_TransactionRequiredException_발생()`과
+> `AFTER_COMMIT_리스너에서_별도_빈의_REQUIRES_NEW로_새_TX를_열면_DB_저장_가능()`에서 확인.
 
-### 함정 4: @Async 기본 스레드풀은 스레드를 무한 생성한다
+### 함정 4: @Async 기본 스레드풀 설정은 프로덕션에 부적합하다
 
-`@Async`의 기본 실행기는 `SimpleAsyncTaskExecutor`다. 이름에 "Executor"가 들어있지만 **스레드 풀이 아니다.** 요청마다 새 스레드를 만들고 재사용하지 않는다.
+Spring Boot에서는 `@EnableAsync`를 설정하면 `applicationTaskExecutor`라는 `ThreadPoolTaskExecutor`가 자동 등록된다. (Raw Spring이면 `SimpleAsyncTaskExecutor`가 기본이라 스레드를 무한 생성하지만, Spring Boot에서는 이 문제는 없다.)
 
-프로덕션에서 이벤트가 대량으로 발생하면 스레드가 무한히 생성되고, 결국 OOM이 터진다.
+그래도 기본 설정(corePoolSize=8, 큐 제한 없음)을 그대로 프로덕션에서 쓰면 위험하다. 이벤트가 대량으로 발생할 때 큐가 무한히 쌓이거나, 스레드 수가 요구에 비해 부족할 수 있다. **반드시 서비스 특성에 맞게 커스텀 설정을 해야 한다.**
 
 ```java
 @Configuration
@@ -306,7 +316,7 @@ class AsyncConfig implements AsyncConfigurer {
 }
 ```
 
-> **TransactionalEventTrapTest** — `Async_기본_스레드풀은_스레드를_무한_생성하고_풀링하지_않는다()`에서 확인.
+> **TransactionalEventTrapTest** — `Async_기본_설정은_커스텀_스레드풀이_없으므로_프로덕션에서_위험하다()`에서 확인.
 
 ---
 
