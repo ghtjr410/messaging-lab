@@ -9,7 +9,6 @@ import org.junit.jupiter.api.DisplayNameGeneration;
 import org.junit.jupiter.api.DisplayNameGenerator;
 import org.junit.jupiter.api.Test;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -41,8 +40,7 @@ class CommandEventBehaviorTest {
     @Test
     void Event는_이미_일어난_사실이므로_발행_자체는_실패하지_않는다() {
         // Given: 이미 확정된 사실
-        OrderCreatedEvent event = new OrderCreatedEvent(
-                "order-1", "user-1", 50_000L, Instant.now());
+        OrderCreatedEvent event = OrderCreatedEvent.of("order-1", "user-1", 50_000L);
 
         // When: Event를 발행한다 (여기서는 단순 리스트에 추가)
         List<OrderCreatedEvent> publishedEvents = new ArrayList<>();
@@ -63,11 +61,12 @@ class CommandEventBehaviorTest {
         Order order = Order.create(command.userId(), command.amount());
 
         // "주문이 생성되었다" — Event (이제 확정된 사실)
-        OrderCreatedEvent event = new OrderCreatedEvent(
-                order.getOrderId(), order.getUserId(), order.getAmount(), Instant.now());
+        OrderCreatedEvent event = OrderCreatedEvent.of(
+                order.getOrderId(), order.getUserId(), order.getAmount());
 
         // Command는 "해라"라는 지시, Event는 "됐다"라는 사실
         assertThat(event.occurredAt()).isNotNull();           // 사실 — 시각이 찍혔다
+        assertThat(event.eventId()).isNotNull();               // 고유 식별자
         assertThat(event.orderId()).isEqualTo(order.getOrderId());  // Command 실행 결과가 Event에 담긴다
         assertThat(event.amount()).isEqualTo(command.amount());
     }

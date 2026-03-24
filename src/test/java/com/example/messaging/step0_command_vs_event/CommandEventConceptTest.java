@@ -8,7 +8,6 @@ import org.junit.jupiter.api.DisplayNameGeneration;
 import org.junit.jupiter.api.DisplayNameGenerator;
 import org.junit.jupiter.api.Test;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
@@ -29,18 +28,20 @@ class CommandEventConceptTest {
 
         assertThat(command.userId()).isEqualTo("user-1");
         assertThat(command.couponType()).isEqualTo("WELCOME");
-        // Command에는 occurredAt(발생시각)이 없다 — 아직 일어나지 않았으니까
+        // Command의 타임스탬프는 requestedAt(요청 시각)이다.
+        // Event의 occurredAt(확정 시각)과 의미가 다르다.
+        assertThat(command.requestedAt()).isNotNull();
+        assertThat(command.commandId()).isNotNull();
     }
 
     @Test
     void Event는_과거시제다_이미_확정된_사실() {
         // Event: "주문이 생성되었다" — 이미 확정된 사실
-        Instant now = Instant.now();
-        OrderCreatedEvent event = new OrderCreatedEvent("order-1", "user-1", 50_000L, now);
+        OrderCreatedEvent event = OrderCreatedEvent.of("order-1", "user-1", 50_000L);
 
         assertThat(event.orderId()).isEqualTo("order-1");
-        assertThat(event.occurredAt()).isNotNull();  // Event에는 발생시각이 있다 — 이미 일어났으니까
-        assertThat(event.occurredAt()).isEqualTo(now);
+        assertThat(event.occurredAt()).isNotNull();  // Event에는 확정 시각이 있다 — 이미 일어났으니까
+        assertThat(event.eventId()).isNotNull();
     }
 
     @Test
@@ -59,8 +60,7 @@ class CommandEventConceptTest {
     @Test
     void Event는_수신자를_모른다_1대N() {
         // Event는 발행만 하고, 누가 듣는지 모른다
-        OrderCreatedEvent event = new OrderCreatedEvent(
-                "order-1", "user-1", 50_000L, Instant.now());
+        OrderCreatedEvent event = OrderCreatedEvent.of("order-1", "user-1", 50_000L);
 
         List<String> reactedListeners = new ArrayList<>();
 
