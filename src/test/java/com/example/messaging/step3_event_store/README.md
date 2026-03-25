@@ -41,6 +41,8 @@ void createOrder(CreateOrderCommand cmd) {
 }
 ```
 
+(예제 단순화를 위해 `String.format`으로 JSON을 생성했다. 실무에서는 `ObjectMapper` 등 JSON 직렬화 라이브러리를 써야 한다. 특수문자가 포함되면 JSON이 깨진다.)
+
 ```mermaid
 sequenceDiagram
     participant OS as OrderService
@@ -113,6 +115,7 @@ sequenceDiagram
 ```
 
 ```java
+@Transactional
 void processEvents() {
     List<EventRecord> pending = eventRecordRepository.findByStatus(PENDING);
     for (EventRecord record : pending) {
@@ -120,17 +123,20 @@ void processEvents() {
         handle(record);
         // 상태 전이
         record.markProcessed();
+        // handle()과 markProcessed()가 같은 TX — 둘 다 성공하거나 둘 다 실패
     }
 }
 ```
 
 > **EventRelayTest** — `스케줄러는_PENDING_상태의_이벤트를_조회하여_처리한다()`에서 확인.
 
+`handle()`과 `markProcessed()`가 **같은 트랜잭션**이어야 한다. 따로 하면 `handle()` 성공 → `markProcessed()` 전에 서버 죽음 → PENDING으로 남음 → 재시작 시 다시 처리 → 이중 적립. 이건 같은 DB에서 처리가 이뤄질 때만 같은 TX로 묶을 수 있다. `handle()`이 외부 API 호출이면 TX로 묶어도 외부 호출은 되돌릴 수 없다 — Step 2의 커밋 전 외부 API 문제와 같은 구조다. (이 문제는 Step 6에서 Kafka + 멱등으로 해결한다.)
+
 처리가 끝나면 상태가 PENDING → PROCESSED로 바뀐다.
 
 > **EventRelayTest** — `처리_완료된_이벤트는_PROCESSED_상태로_변경된다()`에서 확인.
 
-그리고 PROCESSED 상태인 이벤트는 다시 처리되지 않는다. 스케줄러가 두 번 돌아도 중복 적립이 안 된다.
+그리고 PROCESSED 상태인 이벤트는 다시 처리되지 않는다. **단일 인스턴스에서** 스케줄러가 두 번 돌아도 중복 적립이 안 된다. 서버가 여러 대이면 스케줄러가 동시에 같은 PENDING을 가져갈 수 있다 — 이건 DB 레벨 락(`SELECT FOR UPDATE`)이나 분산 락(ShedLock 등)으로 해결해야 하는 별도 문제다. 이 Step에서는 단일 인스턴스를 전제한다.
 
 > **EventRelayTest** — `이미_처리된_이벤트는_다시_처리하지_않는다()`에서 확인.
 
@@ -204,7 +210,7 @@ erDiagram
 
 ---
 
-## 잠깐 — 여기까지면 충분한 경우도 있다
+## 여기까지면 충분한 경우도 있다
 
 모놀리식 애플리케이션에서 후속 처리(포인트 적립, 알림 발송)가 **같은 프로세스 안에서** 이뤄진다면, Event Store + 스케줄러만으로 충분할 수 있다.
 
@@ -217,7 +223,9 @@ erDiagram
 
 이벤트 유실도 없고, 재처리도 되고, 구조도 단순하다. **Kafka 없이도 된다.**
 
-그러면 **언제 Kafka가 필요해지는가?**
+그러면 **언제 프로세스 밖으로 나가야 하는가?**
+
+이건 "분리할래 말래"의 선택이 아니다. **분리해야 하는 상황이 찾아오는 것이다.**
 
 ```
 1. 포인트 서비스를 별도 팀이 독립 배포하게 되면
@@ -228,9 +236,16 @@ erDiagram
 
 3. 이벤트 핸들러가 무거운 작업을 해서 리소스 경합이 생기면
    → 같은 프로세스에서 비즈니스 요청과 DB 커넥션을 나눠 쓰게 된다
+   → 모놀리식에서도 Kafka Self-produce/Self-consume으로
+     무거운 작업을 메인 스레드와 분리할 수 있다
+
+4. 데이터가 커져서 DB가 샤딩되면
+   → orders 테이블과 event_records 테이블이 다른 샤드에 있을 수 있다
+   → 같은 TX로 묶을 수 없다 — Event Store의 핵심 전제가 깨진다
+   → 물리적으로 다른 DB이기 때문에 결과적 일관성을 설계해야 한다
 ```
 
-이 중 하나라도 해당되면 프로세스 밖으로 이벤트를 보내야 한다. 그게 Step 4(Redis Pub/Sub)와 Step 5(Kafka)다.
+이 중 하나라도 해당되면 프로세스 밖으로 이벤트를 보내야 한다. 그게 Step 4(Redis Pub/Sub)와 Step 6(Kafka)다.
 
 ---
 
@@ -238,13 +253,13 @@ erDiagram
 
 지금은 스케줄러가 PENDING 이벤트를 조회해서 **같은 프로세스 안에서** 처리한다.
 
-Step 5에서는 스케줄러가 PENDING 이벤트를 조회해서 **Kafka로 발행**한다.
+Step 6에서는 스케줄러가 PENDING 이벤트를 조회해서 **Kafka로 발행**한다.
 
 ```
 지금 (Step 3):
   스케줄러 → PENDING 조회 → PointService.record() → PROCESSED
 
-Step 5:
+Step 6:
   스케줄러 → PENDING 조회 → Kafka.send() → SENT
   Kafka Consumer → 포인트 적립
 ```
@@ -253,7 +268,7 @@ Step 5:
 
 ```
 도메인 저장 + 이벤트 기록 (같은 TX)  ← Step 3에서 한 것
-릴레이가 이벤트를 Kafka로 발행        ← Step 5에서 할 것
+릴레이가 이벤트를 Kafka로 발행        ← Step 6에서 할 것
 합치면 = Transactional Outbox
 ```
 
@@ -268,7 +283,7 @@ Step 5:
 - 스케줄러가 2번 돌면 포인트가 2번 적립되는가? 왜 안 되는가?
 - Step 2에서는 서버가 죽으면 이벤트가 증발했는데, 여기서는 왜 살아있는가?
 - 모놀리식에서 Event Store + 스케줄러만으로 충분한 상황은 어떤 경우인가?
-- 이 Event Store가 Step 5에서 어떻게 Outbox 테이블이 되는가?
+- 이 Event Store가 Step 6에서 어떻게 Outbox 테이블이 되는가?
 
 > 답이 바로 나오면 Step 4로 넘어가자.
 > 막히면 `EventStoreAtomicityTest`, `EventRelayTest`, `EventStoreRecoveryTest`를 실행해서 확인하자.

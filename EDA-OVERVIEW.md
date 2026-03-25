@@ -123,6 +123,7 @@ quadrantChart
 | 재처리 | X | X | O (offset 되돌림) |
 | Consumer 없을 때 | 유실 | 큐에 보관 | 로그에 보관 |
 | 부하 분산 | X | O (Competing) | O (Partition 분배) |
+| 순서 보장 | X | 단일 Consumer만 O | 파티션 내 O (같은 key) |
 | 독립적 다중 소비 | 브로드캐스트만 | Exchange 설정 필요 | Consumer Group |
 
 ```
@@ -158,8 +159,11 @@ flowchart LR
 ### Idempotent Consumer
 
 - At Least Once 전달이 기본인 환경에서 **필수**
-- **Step 7**에서 3가지 패턴을 비교 구현
+- **Step 7**에서 멱등 패턴을 비교 구현
 - 핵심: "발행은 At Least Once, 소비는 멱등하게"
+
+이 패턴들을 관통하는 설계 원칙을 6개 레이어로 정리한 문서가 있다.
+→ [PRINCIPLES.md](PRINCIPLES.md)
 
 ### Dead Letter Queue (DLQ)
 
@@ -195,7 +199,7 @@ flowchart LR
 → Kafka Connect (MySQL Source Connector)가 Outbox를 CDC로 읽어서 Kafka로 발행
 ```
 
-이 lab에서는 스케줄러(릴레이)가 PENDING을 조회해서 Kafka로 보내지만, 배민은 CDC(Change Data Capture)로 DB 변경을 감지하는 방식을 쓴다. **원리는 같고, 릴레이 구현 방식만 다르다.**
+이 lab에서는 스케줄러(릴레이)가 PENDING을 조회해서 Kafka로 보내지만, 배민은 CDC(Change Data Capture — DB 변경을 실시간으로 감지하는 기술)로 DB 변경을 감지하는 방식을 쓴다. **원리는 같고, 릴레이 구현 방식만 다르다.**
 
 > [우리 팀은 카프카를 어떻게 사용하고 있을까 — 우아한형제들 기술블로그](https://techblog.woowahan.com/17386/)
 

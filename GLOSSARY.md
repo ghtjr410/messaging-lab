@@ -60,7 +60,7 @@
 | **Fire-and-forget** | 메시지를 보내고 결과를 확인하지 않는 방식. Redis Pub/Sub의 기본 동작. 구독자가 없으면 메시지는 사라진다. |
 | **Fan-Out** | 하나의 메시지를 모든 구독자에게 브로드캐스트하는 패턴. 서로 다른 관심사가 같은 이벤트를 각자 처리할 때 적합. |
 | **Backpressure** | Producer가 Consumer보다 빠를 때 발생하는 압력. Redis Pub/Sub에서는 처리 못한 메시지가 유실되고, Kafka에서는 lag으로 쌓인다. |
-| **Push 모델** | 브로커가 Consumer에게 메시지를 밀어넣는 방식. Redis Pub/Sub이 이 모델이다. Consumer가 없으면 메시지가 사라진다. |
+| **Push 모델** | 브로커가 Consumer에게 메시지를 밀어넣는 방식. Redis Pub/Sub, RabbitMQ가 이 모델이다. 단, 유실 여부는 Push/Pull이 아니라 메시지 보존 여부에 의해 결정된다. |
 
 ---
 
@@ -89,6 +89,9 @@
 | **Pull 모델** | Consumer가 자기 속도로 브로커에서 메시지를 가져가는 방식. Kafka가 이 모델이다. Consumer가 없어도 메시지가 로그에 남아있다. |
 | **Transactional Outbox Pattern** | 도메인 변경과 이벤트 기록을 같은 TX로 묶고(Step 3), 릴레이가 외부로 전달하는(Step 6) 패턴. 원자성과 전달 보장을 동시에 확보한다. |
 | **At Least Once** | 메시지가 최소 한 번은 전달되는 보장. 중복은 발생할 수 있다. Kafka의 기본 전달 보장. |
+| **acks** | Producer가 메시지 발행 시 브로커로부터 어떤 수준의 확인을 받을지 설정하는 옵션. acks=0(확인 없음), acks=1(리더만), acks=all(ISR 전체). |
+| **ISR (In-Sync Replicas)** | 리더와 동기화 상태인 레플리카 집합. acks=all은 ISR 전체가 복제 완료해야 ACK를 반환한다. |
+| **Idempotent Producer** | `enable.idempotence=true` 설정. Producer가 리트라이 시 브로커 내 중복 적재를 방지한다. 같은 PID 세션 내에서만 유효. Outbox와는 보장 범위가 다른 보완재. |
 
 ---
 
@@ -97,6 +100,7 @@
 | 용어 | 설명 |
 |------|------|
 | **멱등성 (Idempotency)** | 같은 연산을 여러 번 수행해도 결과가 한 번 수행한 것과 같은 성질. At Least Once 환경에서 필수. |
+| **상태 머신 (State Machine) 멱등** | 도메인 상태가 단방향 전이(CREATED→PAID→SHIPPED)일 때, 현재 상태 확인만으로 중복을 방어하는 패턴. 별도 테이블이나 version 필드가 필요 없다. |
 | **event_handled 테이블** | 처리된 이벤트 ID를 기록하여 중복을 감지하는 범용 멱등 패턴. |
 | **Upsert** | INSERT or UPDATE. 존재하면 갱신, 없으면 삽입. 집계성 데이터(조회수, 좋아요수)에 적합한 멱등 패턴. |
 | **Version 비교** | 메시지의 version을 현재 데이터와 비교하여, 더 높은 version만 반영하는 패턴. 중복뿐 아니라 순서 역전까지 방어한다. |

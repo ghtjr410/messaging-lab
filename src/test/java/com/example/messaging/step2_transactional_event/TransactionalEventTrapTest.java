@@ -161,7 +161,7 @@ class TransactionalEventTrapTest {
      * 프로덕션에서는 반드시 적절한 풀 사이즈와 큐 용량을 설정해야 한다.
      */
     @Test
-    void Async_기본_스레드풀은_제한_없이_설정되어_프로덕션에서_튜닝이_필요하다() {
+    void Async_기본_스레드풀은_큐_제한이_없어_프로덕션에서_튜닝이_필요하다() {
         // Spring Boot가 자동 등록하는 applicationTaskExecutor 확인
         ThreadPoolTaskExecutor executor = applicationContext
                 .getBean("applicationTaskExecutor", ThreadPoolTaskExecutor.class);

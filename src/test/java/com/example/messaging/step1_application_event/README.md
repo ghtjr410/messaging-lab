@@ -54,6 +54,8 @@ sequenceDiagram
 
 포인트 적립이 실패했을 뿐인데, **주문까지 롤백됐다.**
 
+(이 예제는 전부 같은 DB 트랜잭션 안이라 롤백이 가능하다. 만약 StockService가 외부 API를 호출하는 구조라면, DB는 롤백되지만 외부 호출은 되돌릴 수 없다 — Step 0에서 "결제는 비가역적 부수효과"라고 한 이유다.)
+
 이게 우리가 원한 건가? Step 0에서 정리한 판단 기준을 떠올려보자.
 
 > "포인트 적립이 실패해도 주문은 유지해야 하는가?" → Yes
@@ -76,8 +78,7 @@ class EventedOrderService {
 
     void createOrder(...) {
         orderRepository.save(order);
-        publisher.publishEvent(new OrderCreatedEvent(
-                order.getId(), userId, amount, Instant.now()));
+        publisher.publishEvent(OrderCreatedEvent.from(order));
         // 누가 듣든 내 알 바 아님
     }
 }
@@ -126,6 +127,7 @@ sequenceDiagram
     OS->>DB: 주문 저장
     OS->>EP: publish(OrderCreatedEvent)
     EP->>PL: onOrderCreated(event)
+    Note over EP,PL: (동기 호출, 같은 스레드, 같은 TX)
     PL--xEP: RuntimeException!
 
     Note over OS: TX ROLLBACK
@@ -134,7 +136,7 @@ sequenceDiagram
 
 **직접 호출 때와 똑같은 문제다.** 이벤트로 끊었는데 왜?
 
-이유는 단순하다. **`@EventListener`는 발행자와 같은 스레드, 같은 트랜잭션에서 실행되기 때문이다.**
+발행자가 `@Transactional` 안에서 이벤트를 발행하면, **`@EventListener`는 그 트랜잭션 컨텍스트에 참여한다.** 같은 스레드, 같은 TX. 리스너가 별도 트랜잭션을 시작하는 게 아니라, 발행자의 TX를 그대로 공유하는 것이다.
 
 ```java
 @EventListener    // ← 동기적. 같은 스레드. 같은 TX.
@@ -166,7 +168,7 @@ void createOrder(...) {
     publisher.publishEvent(new InventoryDeductEvent(productId, quantity));
     publisher.publishEvent(new CouponUseEvent(couponId));
     publisher.publishEvent(new PaymentRequestEvent(orderId, amount));
-    publisher.publishEvent(new OrderCreatedEvent(orderId, userId, amount, now));
+    publisher.publishEvent(new OrderCreatedEvent(orderId, amount, now));
 }
 ```
 
@@ -194,9 +196,9 @@ OrderCreatedEvent     → "주문이 생성되었다"   → 이건 Event다
   InventoryDeductEvent       → "재고를 차감해라"
 
 올바른 이름 (진짜 Event):
-  OrderCreatedEvent          → "주문이 생성되었다"
-  OrderCompletedEvent        → "주문이 완료되었다"
-  OrderCancelledEvent        → "주문이 취소되었다"
+  OrderCreated               → "주문이 생성되었다"
+  OrderCompleted             → "주문이 완료되었다"
+  OrderCancelled             → "주문이 취소되었다"
 ```
 
 이벤트는 **"누가 무엇을 해라"가 아니라 "무슨 일이 일어났는가"**를 표현해야 한다. 그래야 알림 서비스는 알림을, 재고 서비스는 재고 차감을, 각자 독립적으로 반응할 수 있다.
@@ -220,10 +222,13 @@ void createOrder(CreateOrderCommand cmd) {
     Order order = orderRepository.save(...);
 
     // Event — 비동기, 별도 TX (Step 2에서)
-    publisher.publishEvent(new OrderCreatedEvent(
-            order.getId(), order.getUserId(), order.getAmount(), Instant.now()));
+    publisher.publishEvent(OrderCreatedEvent.of(order.getId(), order.getUserId(), order.getAmount()));
 }
 ```
+
+이 최종 형태에서 생성자 파라미터를 세어보자. `OrderRepository`, `StockService`, `CouponService`, `ApplicationEventPublisher` — **4개다.** 앞에서 "2개로 줄었다"고 했는데, 그건 전부 이벤트로 발행한 중간 단계의 이야기다. Command인 작업(재고, 쿠폰)은 직접 의존이 남아야 하니까, **최종 의존성은 4개다.** 줄어든 건 PointService 하나뿐이고, 대신 EventPublisher가 들어왔다.
+
+그러면 "2개로 줄었다"는 뭐였나? **"전부 이벤트로 바꾸면 이렇게 깔끔해진다"는 유혹을 먼저 보여주고, "근데 그러면 안 된다"를 교정한 것이다.** 결합도 개선은 "Event인 것만 분리"하는 데서 오는 것이지, 전부 이벤트로 바꾸는 데서 오는 게 아니다.
 
 이 구분을 못 하면, "이벤트 기반 아키텍처"라는 이름 아래 **모든 호출을 이벤트로 감싸고, 정작 장애가 나면 "왜 재고가 안 차감됐지?" "왜 결제가 안 됐지?"를 추적할 수 없는** 상황이 된다.
 
@@ -234,14 +239,19 @@ void createOrder(CreateOrderCommand cmd) {
 ```
 직접 호출:
   ✅ 명확한 흐름
-  ❌ 의존성 4개
+  ❌ 의존성 4개 (모든 후속 서비스를 직접 참조)
   ❌ 포인트 실패 → 주문 롤백
 
-ApplicationEvent:
-  ✅ 의존성 2개
+ApplicationEvent (전부 이벤트로 발행한 버전):
+  ✅ 의존성 2개 (OrderRepo + EventPublisher)
   ✅ 리스너 추가로 확장 (OCP)
   ❌ @EventListener가 같은 TX에서 실행 → 리스너 실패 시 발행자 TX 롤백
   ❌ 전부 이벤트로 바꾸면 Command까지 이벤트가 되는 함정
+
+올바른 최종 형태 (Command는 직접, Event만 분리):
+  의존성 4개 (OrderRepo + Stock + Coupon + EventPublisher)
+  PointService 의존만 제거됨 — 극적인 감소가 아니라 적절한 분리
+  ❌ 이벤트가 메모리에만 존재 — 서버가 죽으면 사라진다 → Step 3으로
 ```
 
 ---
@@ -249,9 +259,10 @@ ApplicationEvent:
 ## 스스로 답해보자
 
 - 직접 호출에서 생성자 의존성이 4개인 이유는?
-- ApplicationEvent로 전환하면 왜 2개로 줄어드는가?
+- 전부 이벤트로 발행하면 2개로 줄어드는데, 왜 그 상태가 최종 답이 아닌가?
+- 올바른 최종 형태에서 의존성이 다시 4개인 이유는?
 - 리스너를 추가할 때 OrderService를 수정해야 하는가?
-- `@EventListener`에서 예외가 발생하면 왜 주문까지 롤백되는가?
+- `@EventListener`에서 예외가 발생하면 왜 주문까지 롤백되는가? (`@Transactional`이 없으면?)
 - `InventoryDeductEvent`라는 이름이 왜 잘못된 것인가?
 - "전부 이벤트로 바꾸자"가 왜 위험한가?
 

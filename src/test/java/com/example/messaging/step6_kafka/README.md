@@ -194,6 +194,8 @@ sequenceDiagram
 
 key 설계에서 흔히 틀리는 것: **공유 자원이 뭔지를 잘못 짚는 것이다.** 예를 들어 선착순 쿠폰 발급에서 key를 `userId`로 잡으면 같은 유저의 요청만 같은 파티션으로 간다. 근데 충돌이 나는 공유 자원은 "유저"가 아니라 "쿠폰 수량"이다. `couponId`를 key로 잡아야 같은 쿠폰에 대한 요청이 같은 파티션 → 같은 Consumer → 순차 처리가 된다. **동시성 문제를 락으로 막는 게 아니라, 설계로 발생 조건을 없애는 방식이다.**
 
+단, partition key 하나에 트래픽이 극단적으로 몰리면 **Hot Partition**이 된다. 10만 명이 같은 쿠폰에 동시에 몰리면 해당 파티션 하나에 부하가 집중된다. 이 문제의 구체적인 해결 전략(Key Sharding, Redis 선착순 컷 등)은 kafka-lab에서 다룬다.
+
 ---
 
 ## 이제 Outbox를 완성하자
@@ -237,19 +239,27 @@ sequenceDiagram
 > **TransactionalOutboxCompletionTest** — `주문_저장과_이벤트_기록이_하나의_트랜잭션으로_묶인다()`에서 원자성을 확인.
 > **TransactionalOutboxCompletionTest** — `릴레이가_PENDING_이벤트를_Kafka로_발행하고_SENT로_변경한다()`에서 릴레이를 확인.
 
-왜 Kafka 발행을 트랜잭션 안에서 하지 않는가? 트랜잭션 안에서 Kafka에 발행하면 이런 상황이 생긴다.
+### 왜 Kafka 발행을 트랜잭션 안에서 하지 않는가
+
+DB와 Kafka는 서로 다른 시스템이다. **하나의 트랜잭션으로 원자성을 보장할 수 없다.** 어떤 순서로 하든 문제가 생긴다.
 
 ```
-1. Kafka 발행 성공
-2. DB 롤백
+순서 1: TX 안에서 Kafka 먼저 발행 → DB 커밋
+  Kafka 발행 성공 → DB 롤백
+  → 원본 데이터는 없는데 이벤트가 Kafka에 전파됨
 
-→ 원본 데이터는 없는데 이벤트는 이미 Kafka에 전파됨
-→ 정합성이 깨진다
+순서 2: TX 안에서 DB 커밋 → Kafka 발행
+  DB 커밋 성공 → Kafka 발행 실패
+  → 원본 데이터는 있는데 이벤트가 전파 안 됨
 ```
+
+어느 쪽이든 정합성이 깨진다. 이건 Kafka만의 문제가 아니라 **트랜잭션 안에서 외부 I/O(Kafka, Redis, 외부 API)를 하면 안 되는** 근본적 이유다. 두 시스템 간에는 원자성이 없으니까.
 
 그래서 DB에 먼저 기록하고(같은 TX), 실제 Kafka 발행은 별도 프로세스(릴레이)로 수행하는 것이다. 이게 Outbox Pattern의 핵심이다.
 
-그리고 Kafka 발행이 실패하면? PENDING 상태가 유지된다. 다음 릴레이 실행 시 재시도할 수 있다.
+### Kafka 발행이 실패하면?
+
+PENDING 상태가 유지된다. 다음 릴레이 실행 시 재시도할 수 있다.
 
 ```mermaid
 sequenceDiagram
@@ -267,7 +277,65 @@ sequenceDiagram
 
 > **TransactionalOutboxCompletionTest** — `Kafka_발행_실패_시_이벤트는_여전히_PENDING_상태를_유지한다()`에서 확인.
 
-이게 **At Least Once 발행 보장**이다. 한 번은 반드시 Kafka에 도달한다. 네트워크 장애가 있어도 릴레이가 재시도하니까.
+### 그런데 Kafka 발행이 성공한 뒤에 죽으면?
+
+여기가 핵심이다. 릴레이가 Kafka에 발행하는 과정을 자세히 보자.
+
+```
+① PENDING 조회
+② kafka.send() — 성공 (Kafka에 적재됨)
+③ outbox status = SENT 로 변경 — 💀 여기서 서버가 죽으면?
+```
+
+```mermaid
+sequenceDiagram
+    participant Relay as 릴레이
+    participant OB as outbox (DB)
+    participant Kafka as Kafka
+
+    Relay->>OB: SELECT WHERE status = 'PENDING'
+    OB-->>Relay: msg-001
+
+    Relay->>Kafka: send(msg-001)
+    Kafka-->>Relay: ACK (적재 완료)
+
+    Note over Relay: ② 성공. 이제 SENT로 바꾸려는데...
+    Note over Relay: 💀 서버 죽음!
+
+    Note over OB: 여전히 PENDING
+    Note over Kafka: msg-001 이미 적재됨
+```
+
+Kafka에는 이미 들어갔는데, outbox에는 아직 PENDING이다. 릴레이가 재시작하면 PENDING을 다시 조회해서 **같은 메시지를 또 발행한다.** Kafka에 msg-001이 2건이 된다.
+
+**"발행이 안 된 건 아니다. 발행됐다는 사실을 기록 못 한 것이다."**
+
+그러면 순서를 바꿔서 SENT를 먼저 갱신하면?
+
+```
+① PENDING 조회
+② outbox status = SENT 로 변경
+③ kafka.send() — 💀 여기서 서버가 죽으면?
+→ SENT인데 Kafka에는 안 들어감 → 메시지 유실
+```
+
+**중복보다 유실이 훨씬 위험하다.** 중복은 Consumer 멱등으로 막을 수 있지만, 유실은 복구할 방법이 없다. 그래서 **"발행 먼저, 상태 갱신 나중에"** 순서를 선택한다.
+
+이게 **At Least Once 발행 보장**이다. 0번 전달은 절대 없고, 2번은 있을 수 있다. 그리고 그 "2번"을 Step 7의 멱등 처리가 막아준다. 합치면 **effectively exactly-once**가 된다.
+
+### 자주 혼동되는 것 — Idempotent Producer와 Outbox는 다른 문제를 해결한다
+
+```
+Kafka Idempotent Producer (enable.idempotence=true):
+  Producer가 리트라이하다가 같은 메시지가 브로커에 2번 들어가는 걸 막는다.
+  → 브로커 내부의 안전 장치.
+
+Outbox Pattern:
+  애플리케이션이 DB는 커밋했는데 Kafka 발행 자체를 못 한 경우를 막는다.
+  → 애플리케이션 레벨의 안전 장치.
+```
+
+Idempotent Producer를 켜도 "발행 자체가 안 된" 상황은 커버 못 한다. Outbox가 "반드시 발행한다"를 보장하고, Idempotent Producer가 "브로커 안에서 중복을 막는다"를 보장한다. **둘은 보장 범위가 다른 보완재다.**
 
 ---
 
@@ -293,8 +361,9 @@ Step 6: Kafka → 소비해도 로그에 남음 + 재처리 가능
 - Consumer Group A가 느려도 Group B에 영향이 없는 이유는?
 - "순서 보장"이 토픽 전체가 아니라 파티션 단위인 이유는?
 - 선착순 쿠폰 발급에서 key를 `userId`가 아니라 `couponId`로 잡아야 하는 이유는?
-- Outbox Pattern에서 Kafka 발행을 왜 트랜잭션 안에서 하지 않는가?
-- Kafka 발행이 실패해도 이벤트가 PENDING으로 남아있으면 왜 안전한가?
+- Outbox Pattern에서 Kafka 발행을 왜 트랜잭션 안에서 하지 않는가? (양쪽 시나리오를 말할 수 있는가?)
+- "발행 먼저, 상태 갱신 나중에" 순서를 선택한 이유는?
+- Idempotent Producer와 Outbox Pattern이 해결하는 문제가 어떻게 다른가?
 - At Least Once 발행이 보장되면, Consumer 쪽에서는 어떤 문제가 생기는가?
 
 > 마지막 질문의 답이 Step 7의 존재 이유다.
@@ -317,8 +386,9 @@ Step 6: Kafka → 소비해도 로그에 남음 + 재처리 가능
 
 At Least Once 발행을 보장하면, **같은 메시지가 2번 올 수 있다.**
 
-릴레이가 Kafka에 발행하고 SENT로 바꾸기 직전에 죽으면, 재시작 시 같은 이벤트를 다시 발행한다. Consumer가 메시지를 처리하고 offset 커밋하기 직전에 죽으면, 재시작 시 같은 메시지를 다시 읽는다.
+릴레이 쪽: kafka.send() 성공 → SENT 갱신 전에 죽음 → 재시작 시 다시 발행 → **중복 발행.**
+Consumer 쪽: 메시지 처리 성공 → offset 커밋 전에 죽음 → 재시작 시 다시 읽음 → **중복 소비.**
 
-**포인트가 2번 적립되거나, 쿠폰이 2번 발급된다.**
+**같은 구조의 문제다.** "작업 + 상태 갱신 사이의 간극"이 Producer에서는 "send + SENT", Consumer에서는 "처리 + offset 커밋"으로 나타난다. 어느 쪽이든 **포인트가 2번 적립되거나, 쿠폰이 2번 발급된다.**
 
-Step 7에서 이 중복을 방어하는 세 가지 멱등 패턴을 구현한다.
+Step 7에서 이 중복을 방어하는 멱등 패턴을 구현한다.
