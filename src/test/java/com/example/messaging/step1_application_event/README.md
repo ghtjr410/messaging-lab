@@ -70,6 +70,10 @@ sequenceDiagram
 
 > **DirectCallCouplingTest** — `직접_호출_방식에서_후속_처리_실패시_주문도_롤백된다()`에서 확인.
 
+(물론 모든 후속 처리가 성공하면 주문은 정상 완료된다.)
+
+> **DirectCallCouplingTest** — `직접_호출_방식에서_모든_후속_처리가_성공하면_주문이_완료된다()`에서 정상 흐름을 확인.
+
 ---
 
 ## ApplicationEvent로 끊어보자
@@ -110,6 +114,10 @@ sequenceDiagram
 ```
 
 > **ApplicationEventDecouplingTest** — `이벤트_방식에서_OrderService는_EventPublisher에만_의존한다()`에서 확인.
+
+이벤트 발행 후 리스너가 정상 처리하면 모든 후속 데이터가 저장된다.
+
+> **ApplicationEventDecouplingTest** — `이벤트_발행_후_리스너가_정상_처리하면_모든_데이터가_저장된다()`에서 정상 흐름을 확인.
 
 내일 알림 서비스를 추가해도 OrderService 코드는 한 줄도 안 바뀐다. 리스너만 하나 더 만들면 된다.
 
