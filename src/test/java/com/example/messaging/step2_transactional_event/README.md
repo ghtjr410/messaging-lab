@@ -30,11 +30,12 @@ sequenceDiagram
     participant OS as OrderService
     participant DB as DB
     participant PL as PointListener
+    participant API as 외부 API
 
     Note over OS: TX BEGIN
     OS->>DB: INSERT 주문
     OS->>PL: @EventListener (동기)
-    PL->>PL: 외부 API 호출 (이미 실행됨!)
+    PL->>API: 호출 (이미 실행됨!)
 
     Note over OS: TX ROLLBACK!
 
@@ -227,7 +228,7 @@ Eventual Consistency를 수용했다는 건 쓰기만 비동기로 바꾸면 끝
 
 ---
 
-## 여기서 밟는 함정 세 가지
+## 여기서 밟는 함정 네 가지
 
 AFTER_COMMIT + @Async까지 왔으면 기본 구조는 잡힌 거다. 근데 실제로 코드를 짜면 밟게 되는 함정이 있다.
 
@@ -274,7 +275,7 @@ void onOrderCreated(OrderCreatedEvent event) {
 
 AFTER_COMMIT 리스너는 기존 TX가 커밋된 후 실행된다. 이 시점에서 새로운 DB 쓰기를 하려면 새 트랜잭션이 필요한데, 기존 트랜잭션 동기화 컨텍스트 안에서는 새 TX가 정상적으로 열리지 않을 수 있다. `save()` 내부의 `@Transactional`이 이미 커밋된 TX에 참여하려다가 실패하거나, 영속성 컨텍스트가 닫힌 상태라 예외가 발생한다.
 
-해결하려면 **별도 빈에서 `REQUIRES_NEW`로 명시적으로 새 TX를 열어야 한다.** 같은 클래스에서 `@Transactional(REQUIRES_NEW)`를 달아도 **self-invocation** 때문에 프록시를 타지 않으니까, 반드시 별도 빈으로 분리해야 한다.
+해결하려면 **별도 빈에서 `REQUIRES_NEW`로 명시적으로 새 TX를 열어야 한다.** 같은 클래스에서 `@Transactional(REQUIRES_NEW)`를 달아도 **self-invocation**(같은 객체 내부에서 메서드를 호출하면 프록시를 거치지 않아 AOP가 동작하지 않는 현상) 때문에 프록시를 타지 않으니까, 반드시 별도 빈으로 분리해야 한다.
 
 ```java
 // 별도 빈

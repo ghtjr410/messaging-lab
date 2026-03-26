@@ -89,21 +89,25 @@ class EventedOrderService {
 }
 ```
 
+생성자 파라미터가 4개에서 2개로 줄었다. **StockService, CouponService, PointService에 대한 의존이 사라졌다.**
+
 ```mermaid
 sequenceDiagram
     participant OS as OrderService
     participant EP as EventPublisher
+    participant SL as StockListener
+    participant CL as CouponListener
     participant PL as PointListener
     participant NL as NotificationListener
 
     OS->>EP: publish(OrderCreatedEvent)
+    EP->>SL: 재고 차감
+    EP->>CL: 쿠폰 사용
     EP->>PL: 포인트 적립
     EP->>NL: 알림 발송
 
     Note over OS: 리스너가 몇 개인지<br/>누가 듣는지 모른다
 ```
-
-생성자 파라미터가 4개에서 2개로 줄었다. **StockService, CouponService, PointService에 대한 의존이 사라졌다.**
 
 > **ApplicationEventDecouplingTest** — `이벤트_방식에서_OrderService는_EventPublisher에만_의존한다()`에서 확인.
 
@@ -208,6 +212,8 @@ OrderCreatedEvent     → "주문이 생성되었다"   → 이건 Event다
 
 이벤트는 **"누가 무엇을 해라"가 아니라 "무슨 일이 일어났는가"**를 표현해야 한다. 그래야 알림 서비스는 알림을, 재고 서비스는 재고 차감을, 각자 독립적으로 반응할 수 있다.
 
+### 그러면 올바른 최종 형태는?
+
 Step 0의 판단 기준을 다시 꺼내보자.
 
 > "이 작업이 실패하면 주문도 실패해야 하는가?"
@@ -267,7 +273,7 @@ ApplicationEvent (전부 이벤트로 발행한 버전):
 - 전부 이벤트로 발행하면 2개로 줄어드는데, 왜 그 상태가 최종 답이 아닌가?
 - 올바른 최종 형태에서 의존성이 다시 4개인 이유는?
 - 리스너를 추가할 때 OrderService를 수정해야 하는가?
-- `@EventListener`에서 예외가 발생하면 왜 주문까지 롤백되는가? (`@Transactional`이 없으면?)
+- `@EventListener`에 `@Transactional`이 없어도 예외가 발생하면 왜 주문까지 롤백되는가?
 - `InventoryDeductEvent`라는 이름이 왜 잘못된 것인가?
 - "전부 이벤트로 바꾸자"가 왜 위험한가?
 
