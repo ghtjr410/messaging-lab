@@ -41,15 +41,20 @@ PointService에서 예외가 발생하는 상황을 만들어보자.
 sequenceDiagram
     participant OS as OrderService
     participant DB as OrderRepository
+    participant SS as StockService
+    participant CS as CouponService
     participant PS as PointService
 
     Note over OS: TX BEGIN
     OS->>DB: 주문 저장
+    OS->>SS: 재고 차감 (성공)
+    OS->>CS: 쿠폰 사용 (성공)
     OS->>PS: 포인트 적립
     PS--xOS: RuntimeException!
 
     Note over OS: TX ROLLBACK
     Note over DB: 주문도 사라짐
+    Note over SS,CS: 재고 차감, 쿠폰 사용도 롤백
 ```
 
 포인트 적립이 실패했을 뿐인데, **주문까지 롤백됐다.**
